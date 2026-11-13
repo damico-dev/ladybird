@@ -167,10 +167,9 @@ TerminalWebView::TerminalWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
     if (Core::Environment::get("TMUX"sv).has_value()) {
         m_is_in_tmux = true;
         // Images belong to the terminal, which every tmux pane shares, so each view picks its own ID. Placeholder cells
-        // carry its low byte as a 256-color foreground, which tmux passes on unchanged from 16 up, and its high byte as
-        // a third diacritic.
-        auto pid = static_cast<u32>(getpid());
-        m_placeholder_image_id = ((1 + pid / 240 % 255) << 24) | (16 + pid % 240);
+        // carry it as a 24-bit foreground color, which programs that draw a pane's cells again keep as it is, where they
+        // would turn a 256-color index into the color of their own palette.
+        m_placeholder_image_id = 1 + static_cast<u32>(getpid()) % 0xffffff;
         if (auto depth = Core::Environment::get("LADYBIRD_TMUX_DEPTH"sv); depth.has_value()) {
             m_tmux_depth = depth->to_number<u8>();
             m_tmux_depth_is_fixed = m_tmux_depth.has_value();
@@ -480,14 +479,13 @@ void TerminalWebView::draw_unicode_placeholders(int columns, int rows)
     rows = min(rows, static_cast<int>(unicode_placeholder_diacritics.size()));
 
     StringBuilder text;
-    text.appendff("\x1b[38;5;{}m", m_placeholder_image_id & 0xff);
+    text.appendff("\x1b[38;2;{};{};{}m", m_placeholder_image_id >> 16, (m_placeholder_image_id >> 8) & 0xff, m_placeholder_image_id & 0xff);
     for (int row = 0; row < rows; ++row) {
         text.appendff("\x1b[{};1H", row + 1);
-        // The first cell of a row names its row, its column and the ID's high byte; the cells after it follow on.
+        // The first cell of a row names its row and column; the cells after it follow on.
         text.append_code_point(unicode_placeholder);
         text.append_code_point(unicode_placeholder_diacritics[row]);
         text.append_code_point(unicode_placeholder_diacritics[0]);
-        text.append_code_point(unicode_placeholder_diacritics[m_placeholder_image_id >> 24]);
         for (int column = 1; column < columns; ++column)
             text.append_code_point(unicode_placeholder);
     }
