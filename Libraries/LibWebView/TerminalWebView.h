@@ -61,12 +61,16 @@ private:
     void quit();
     void write_to_terminal(StringView);
 
+    void probe_tmux_depth();
+    void write_graphics_command(StringView keys);
+    void delete_images();
     void apply_pane_geometry();
 
     void schedule_frame_flush();
     void flush_frame();
     ErrorOr<void> transmit_frame(Gfx::Bitmap const&);
     ErrorOr<void> send_image_data(StringView keys, ReadonlyBytes pixels);
+    void draw_unicode_placeholders(int columns, int rows);
 
     void handle_input(TerminalInput const&);
     void handle_mouse_report(TerminalMouseReport const&);
@@ -99,6 +103,14 @@ private:
     bool m_sends_damaged_rectangles { false };
     Optional<u32> m_displayed_image_id;
     Gfx::IntSize m_displayed_image_size;
+
+    // Inside tmux, graphics commands are wrapped once for each tmux between this view and the terminal, and frames are
+    // shown as Unicode placeholder cells. Until the depth is known, no frame is sent.
+    bool m_is_in_tmux { false };
+    Optional<u8> m_tmux_depth;
+    bool m_tmux_depth_is_fixed { false };
+    RefPtr<Core::Timer> m_tmux_depth_probe_timer;
+    u32 m_placeholder_image_id { 0 };
 
     Web::UIEvents::MouseButton m_held_mouse_buttons { Web::UIEvents::MouseButton::None };
     Web::UIEvents::MouseButton m_last_pressed_mouse_button { Web::UIEvents::MouseButton::None };

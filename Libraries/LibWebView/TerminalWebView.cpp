@@ -9,6 +9,7 @@
 #include <AK/NeverDestroyed.h>
 #include <AK/StringBuilder.h>
 #include <AK/Utf8View.h>
+#include <LibCore/Environment.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
 #include <LibCore/Notifier.h>
@@ -61,15 +62,53 @@ static constexpr u32 first_image_id = 1;
 static constexpr size_t direct_transmission_raw_chunk_size = 3072;
 static constexpr size_t direct_transmission_flush_size = 256 * KiB;
 
+// Inside tmux, a frame is shown as a grid of these placeholder cells, which tmux keeps and redraws like any other
+// text. Each carries the image ID in its foreground color and its place in the image in combining diacritics.
+static constexpr u32 unicode_placeholder = 0x10EEEE;
+static constexpr Array<u32, 297> unicode_placeholder_diacritics {
+    0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351,
+    0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369, 0x036A, 0x036B, 0x036C, 0x036D,
+    0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599,
+    0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1, 0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
+    0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6,
+    0x06D7, 0x06D8, 0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2, 0x06E4, 0x06E7, 0x06E8, 0x06EB,
+    0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743, 0x0745, 0x0747,
+    0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3, 0x0816, 0x0817, 0x0818, 0x0819,
+    0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822, 0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A,
+    0x082B, 0x082C, 0x082D, 0x0951, 0x0953, 0x0954, 0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD,
+    0x193A, 0x1A17, 0x1A75, 0x1A76, 0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F,
+    0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1, 0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+    0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5, 0x1DD6, 0x1DD7,
+    0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1, 0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5,
+    0x1DE6, 0x1DFE, 0x20D0, 0x20D1, 0x20D4, 0x20D5, 0x20D6, 0x20D7, 0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0,
+    0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2, 0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA,
+    0x2DEB, 0x2DEC, 0x2DED, 0x2DEE, 0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8,
+    0x2DF9, 0x2DFA, 0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1,
+    0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED, 0xA8EE, 0xA8EF,
+    0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xFE20, 0xFE21, 0xFE22, 0xFE23,
+    0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187, 0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC,
+    0x1D1AD, 0x1D242, 0x1D243, 0x1D244
+};
+
+// Graphics replies come back through tmux, so a query wrapped for each possible depth is answered only by the one that
+// reached the terminal.
+static constexpr u32 tmux_depth_probe_first_image_id = 0x10000;
+static constexpr u8 tmux_depth_probe_max_depth = 3;
+static constexpr auto tmux_depth_probe_timeout = AK::Duration::from_seconds(1);
+
 static ByteString temporary_frame_path(u64 transmission_number)
 {
     // The terminal only reads image files whose path names them as such, in a temporary directory.
     return ByteString::formatted("/tmp/tty-graphics-protocol-ladybird-{}-{}.rgb", getpid(), transmission_number);
 }
 
-static void append_graphics_command(StringBuilder& builder, StringView keys, StringView payload)
+static ByteString graphics_command(StringView keys, StringView payload, u8 tmux_depth)
 {
-    builder.appendff("\x1b_G{};{}\x1b\\", keys, payload);
+    auto command = payload.is_empty() ? ByteString::formatted("\x1b_G{}\x1b\\", keys) : ByteString::formatted("\x1b_G{};{}\x1b\\", keys, payload);
+    // Each tmux passes on what is wrapped in its passthrough sequence, with the escape characters in it doubled.
+    for (u8 i = 0; i < tmux_depth; ++i)
+        command = ByteString::formatted("\x1bPtmux;{}\x1b\\", command.replace("\x1b"sv, "\x1b\x1b"sv));
+    return command;
 }
 
 ErrorOr<void> TerminalWebView::take_over_terminal()
@@ -125,6 +164,19 @@ TerminalWebView::TerminalWebView(Core::AnonymousBuffer theme, Web::DevicePixelSi
 {
     m_device_pixel_ratio = device_pixel_ratio;
 
+    if (Core::Environment::get("TMUX"sv).has_value()) {
+        m_is_in_tmux = true;
+        // Images belong to the terminal, which every tmux pane shares, so each view picks its own ID. Placeholder cells
+        // carry its low byte as a 256-color foreground, which tmux passes on unchanged from 16 up, and its high byte as
+        // a third diacritic.
+        auto pid = static_cast<u32>(getpid());
+        m_placeholder_image_id = ((1 + pid / 240 % 255) << 24) | (16 + pid % 240);
+        if (auto depth = Core::Environment::get("LADYBIRD_TMUX_DEPTH"sv); depth.has_value()) {
+            m_tmux_depth = depth->to_number<u8>();
+            m_tmux_depth_is_fixed = m_tmux_depth.has_value();
+        }
+    }
+
     on_title_change = [this](auto const&) { draw_status_line(); };
     on_url_change = [this](auto const&) { draw_status_line(); };
     on_loading_state_change = [this](bool) { draw_status_line(); };
@@ -165,6 +217,10 @@ void TerminalWebView::enter_terminal_modes()
         ::tcsetattr(STDIN_FILENO, TCSANOW, &raw_attributes);
     }
     m_terminal_modes_entered = true;
+
+    // tmux drops what a pane passes through while that pane waits to be redrawn, as it does after switching screens.
+    if (m_is_in_tmux && !m_tmux_depth_is_fixed)
+        probe_tmux_depth();
 
     // Alternate screen, hidden cursor, mouse reports for every motion with SGR pixel coordinates, focus reports,
     // bracketed paste and the keyboard protocol; then ask which keyboard flags took.
@@ -218,7 +274,7 @@ void TerminalWebView::leave_terminal_modes()
     m_signal_handler_ids.clear();
 
     write_to_terminal("\x1b[<u\x1b[?2004l\x1b[?1004l\x1b[?1016l\x1b[?1006l\x1b[?1003l"sv);
-    write_to_terminal(delete_all_images);
+    delete_images();
     write_to_terminal("\x1b[?25h\x1b[?1049l"sv);
     ::tcsetattr(STDIN_FILENO, TCSANOW, &m_original_terminal_attributes);
 
@@ -227,12 +283,51 @@ void TerminalWebView::leave_terminal_modes()
         (void)Core::System::unlink(temporary_frame_path(number));
 }
 
+void TerminalWebView::probe_tmux_depth()
+{
+    // Frames wait for the reply. Without one, the depth found before is kept.
+    auto previous_depth = m_tmux_depth;
+    m_tmux_depth.clear();
+
+    StringBuilder probes;
+    for (u8 depth = 1; depth <= tmux_depth_probe_max_depth; ++depth)
+        probes.append(graphics_command(ByteString::formatted("a=q,i={},s=1,v=1,f=24,t=d", tmux_depth_probe_first_image_id + depth), "AAAA"sv, depth));
+    write_to_terminal(probes.string_view());
+
+    m_tmux_depth_probe_timer = Core::Timer::create_single_shot(tmux_depth_probe_timeout, [this, previous_depth] {
+        if (m_tmux_depth.has_value())
+            return;
+        if (!previous_depth.has_value())
+            show_notice("no graphics reply through tmux; is allow-passthrough on?");
+        m_tmux_depth = previous_depth.value_or(1);
+        schedule_frame_flush();
+    });
+    m_tmux_depth_probe_timer->start();
+}
+
+void TerminalWebView::write_graphics_command(StringView keys)
+{
+    if (m_is_in_tmux && !m_tmux_depth.has_value())
+        return;
+    write_to_terminal(graphics_command(keys, {}, m_tmux_depth.value_or(0)));
+}
+
+void TerminalWebView::delete_images()
+{
+    // Other panes of the terminal may be showing images of their own.
+    if (m_is_in_tmux) {
+        write_graphics_command(ByteString::formatted("a=d,d=I,i={},q=2", m_placeholder_image_id));
+        return;
+    }
+    write_to_terminal(delete_all_images);
+}
+
 void TerminalWebView::apply_pane_geometry()
 {
     m_drawn_status_line = {};
     m_frame_needs_full_redraw = true;
     m_displayed_image_id.clear();
-    write_to_terminal(delete_all_images);
+    delete_images();
     write_to_terminal("\x1b[2J"sv);
     draw_status_line();
 
@@ -265,7 +360,7 @@ void TerminalWebView::schedule_frame_flush()
 
 void TerminalWebView::flush_frame()
 {
-    if (!m_terminal_modes_entered)
+    if (!m_terminal_modes_entered || (m_is_in_tmux && !m_tmux_depth.has_value()))
         return;
 
     auto frame = backing_stores().displayed_frame();
@@ -305,21 +400,20 @@ static ErrorOr<void> convert_to_rgb(Gfx::Bitmap const& bitmap, Gfx::IntRect rect
 
 ErrorOr<void> TerminalWebView::send_image_data(StringView keys, ReadonlyBytes pixels)
 {
-    StringBuilder command;
     if (m_graphics_transmission == GraphicsTransmission::TemporaryFile) {
         auto path = temporary_frame_path(m_image_data_transmissions++);
         auto file = TRY(Core::File::open(path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate, 0600));
         TRY(file->write_until_depleted(pixels));
-        append_graphics_command(command, ByteString::formatted("{},t=t", keys), TRY(encode_base64(path.bytes())));
-        write_to_terminal(command.string_view());
+        write_to_terminal(graphics_command(ByteString::formatted("{},t=t", keys), TRY(encode_base64(path.bytes())), m_tmux_depth.value_or(0)));
         return {};
     }
 
+    StringBuilder command;
     for (size_t offset = 0; offset < pixels.size(); offset += direct_transmission_raw_chunk_size) {
         auto chunk = pixels.slice(offset, min(direct_transmission_raw_chunk_size, pixels.size() - offset));
         auto has_more_chunks = offset + direct_transmission_raw_chunk_size < pixels.size();
         auto chunk_keys = offset == 0 ? ByteString::formatted("{},m={}", keys, has_more_chunks ? 1 : 0) : ByteString::formatted("m={}", has_more_chunks ? 1 : 0);
-        append_graphics_command(command, chunk_keys, TRY(encode_base64(chunk)));
+        command.append(graphics_command(chunk_keys, TRY(encode_base64(chunk)), m_tmux_depth.value_or(0)));
         if (command.length() >= direct_transmission_flush_size || !has_more_chunks) {
             write_to_terminal(command.string_view());
             command.clear();
@@ -352,16 +446,53 @@ ErrorOr<void> TerminalWebView::transmit_frame(Gfx::Bitmap const& bitmap)
     }
 
     TRY(convert_to_rgb(bitmap, frame_rect, m_frame_pixels));
+
+    // Each frame replaces the image the placeholder cells name, so the cells are only drawn again when the grid changes.
+    if (m_is_in_tmux) {
+        auto cell_width = m_pane_geometry.cell_width();
+        auto cell_height = m_pane_geometry.cell_height();
+        if (cell_width <= 0 || cell_height <= 0)
+            return {};
+        auto columns = ceil_div(size.width(), cell_width);
+        auto rows = ceil_div(size.height(), cell_height);
+        TRY(send_image_data(ByteString::formatted("a=T,U=1,f=24,s={},v={},i={},c={},r={},q=1", size.width(), size.height(), m_placeholder_image_id, columns, rows), m_frame_pixels));
+        if (!shows_frame_of_this_size)
+            draw_unicode_placeholders(columns, rows);
+        m_displayed_image_id = m_placeholder_image_id;
+        m_displayed_image_size = size;
+        return {};
+    }
+
     auto image_id = m_displayed_image_id == first_image_id ? first_image_id + 1 : first_image_id;
     write_to_terminal("\x1b[1;1H"sv);
     TRY(send_image_data(ByteString::formatted("a=T,f=24,s={},v={},i={},p=1,C=1,q=1", size.width(), size.height(), image_id), m_frame_pixels));
     // The new frame is placed before the old one goes, so the pane never shows neither.
     if (m_displayed_image_id.has_value())
-        write_to_terminal(ByteString::formatted("\x1b_Ga=d,d=I,i={},q=2\x1b\\", *m_displayed_image_id));
+        write_graphics_command(ByteString::formatted("a=d,d=I,i={},q=2", *m_displayed_image_id));
 
     m_displayed_image_id = image_id;
     m_displayed_image_size = size;
     return {};
+}
+
+void TerminalWebView::draw_unicode_placeholders(int columns, int rows)
+{
+    rows = min(rows, static_cast<int>(unicode_placeholder_diacritics.size()));
+
+    StringBuilder text;
+    text.appendff("\x1b[38;5;{}m", m_placeholder_image_id & 0xff);
+    for (int row = 0; row < rows; ++row) {
+        text.appendff("\x1b[{};1H", row + 1);
+        // The first cell of a row names its row, its column and the ID's high byte; the cells after it follow on.
+        text.append_code_point(unicode_placeholder);
+        text.append_code_point(unicode_placeholder_diacritics[row]);
+        text.append_code_point(unicode_placeholder_diacritics[0]);
+        text.append_code_point(unicode_placeholder_diacritics[m_placeholder_image_id >> 24]);
+        for (int column = 1; column < columns; ++column)
+            text.append_code_point(unicode_placeholder);
+    }
+    text.append("\x1b[39m"sv);
+    write_to_terminal(text.string_view());
 }
 
 void TerminalWebView::handle_input(TerminalInput const& input)
@@ -383,11 +514,31 @@ void TerminalWebView::handle_input(TerminalInput const& input)
         },
         [this](TerminalFocusChange const& focus_change) {
             set_has_system_focus(focus_change.has_focus);
+            // tmux does not pass on anything from a pane it is not showing, so the frame on display may be stale, and the
+            // pane may now be shown through a different number of tmux servers.
+            if (m_is_in_tmux && focus_change.has_focus) {
+                if (!m_tmux_depth_is_fixed)
+                    probe_tmux_depth();
+                m_frame_needs_full_redraw = true;
+                schedule_frame_flush();
+            }
         },
         [this](TerminalCommand const& command) {
             handle_command(command);
         },
         [this](TerminalGraphicsReply const& reply) {
+            if (m_is_in_tmux && reply.text.starts_with("i="sv)) {
+                auto id = reply.text.substring_view(2, reply.text.find_any_of(",;"sv).value_or(reply.text.length()) - 2).to_number<u32>();
+                if (id.has_value() && *id > tmux_depth_probe_first_image_id && *id <= tmux_depth_probe_first_image_id + tmux_depth_probe_max_depth) {
+                    auto depth = static_cast<u8>(*id - tmux_depth_probe_first_image_id);
+                    if (m_tmux_depth != depth) {
+                        m_tmux_depth = depth;
+                        m_frame_needs_full_redraw = true;
+                        schedule_frame_flush();
+                    }
+                    return;
+                }
+            }
             if (reply.text.ends_with(";OK"sv))
                 return;
             if (m_graphics_transmission == GraphicsTransmission::TemporaryFile) {
@@ -423,8 +574,17 @@ static Web::MouseEvent mouse_event(Web::MouseEvent::Type type, Gfx::IntPoint pos
     return event;
 }
 
-void TerminalWebView::handle_mouse_report(TerminalMouseReport const& report)
+void TerminalWebView::handle_mouse_report(TerminalMouseReport const& original_report)
 {
+    // tmux reports the cell under the mouse rather than the pixel, so this takes the middle of that cell.
+    auto report = original_report;
+    if (m_is_in_tmux) {
+        report.position = {
+            report.position.x() * m_pane_geometry.cell_width() + m_pane_geometry.cell_width() / 2,
+            report.position.y() * m_pane_geometry.cell_height() + m_pane_geometry.cell_height() / 2,
+        };
+    }
+
     auto viewport = viewport_size().to_type<int>();
     auto is_in_status_line = report.position.y() >= viewport.height();
     auto position_in_page = Gfx::IntPoint {
